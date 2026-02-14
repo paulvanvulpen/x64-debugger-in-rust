@@ -1,0 +1,7 @@
+
+[workspace]
+members = [
+	"sdb",
+	"libsdb",
+]
+resolver = "2"
