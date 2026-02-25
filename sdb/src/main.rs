@@ -2,13 +2,16 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use env_logger::Env;
 
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
+use rustyline::history::History;
+
 use nix::sys;
 use nix::unistd::{self, Pid};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg()]
     program_path: String,
 
     #[arg(short = 'p')]
@@ -43,13 +46,39 @@ fn attach(args: Args) -> Result<Pid> {
     }
 }
 
+fn handle_command(pid: Pid, line: &str) {
+    println!("Called code {}", line);
+}
+
 fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
     builder.target(env_logger::Target::Stdout);
     builder.init();
 
     let args = Args::parse();
-    attach(args);
+    let pid = attach(args).context("Attaching to a process")?;
+    let mut editor = DefaultEditor::new()?;
 
+    loop {
+        let read_line = editor.readline("sdb> ");
+        match read_line {
+            Ok(line) => {
+                editor
+                    .add_history_entry(line.as_str())
+                    .context("adding to shell history")?;
+                handle_command(pid, line.as_str());
+            }
+            Err(error) => {
+                match error {
+                    ReadlineError::Eof | ReadlineError::Interrupted => {
+                        log::info!("debugger was interrupted by the user")
+                    }
+                    _ => log::warn!("failed to read command, error: {:?}", error),
+                }
+
+                break;
+            }
+        };
+    }
     Ok(())
 }
