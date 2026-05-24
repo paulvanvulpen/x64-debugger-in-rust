@@ -11,39 +11,40 @@ use nix::unistd::{self, Pid};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
+#[group(id = "target", required = true, multiple = false)]
 struct Args {
-    program_path: String,
+    #[arg(group = "target")]
+    program_path: Option<String>,
 
-    #[arg(short = 'p')]
+    #[arg(short = 'p', group = "target")]
     pid: Option<i32>,
 }
 
 fn attach(args: Args) -> Result<Pid> {
-    match args.pid {
-        Some(pid) => {
-            if pid <= 0 {
-                bail!("Invalid pid")
-            }
-            let pid = Pid::from_raw(pid);
-            sys::ptrace::attach(pid).with_context(|| format!("attach to process {}", pid))?;
-            Ok(pid)
+    if let Some(pid) = args.pid {
+        if pid <= 0 {
+            bail!("Invalid pid")
         }
-        None => {
-            let fork_result = unsafe { unistd::fork().context("fork failed")? };
-            if fork_result.is_child() {
-                sys::ptrace::traceme()
-                    .context("allow to send more ptrace request to this process in the future")?;
-                let program_path = std::ffi::CString::new(args.program_path)
-                    .context("exec_vector_path requires a c-string")?;
-
-                unistd::execvp(&program_path, &[&program_path])?;
-                let wait_status = sys::wait::wait().context(
-                    "wait for child process to change status / has child changed status",
-                )?;
-            }
-            Ok(Pid::from_raw(0))
-        }
+        let pid = Pid::from_raw(pid);
+        sys::ptrace::attach(pid).with_context(|| format!("attach to process {}", pid))?;
+        return Ok(pid);
     }
+    if let Some(program_path) = args.program_path {
+        let fork_result = unsafe { unistd::fork().context("fork failed")? };
+        if fork_result.is_child() {
+            sys::ptrace::traceme()
+                .context("allow to send more ptrace request to this process in the future")?;
+            let program_path = std::ffi::CString::new(program_path)
+                .context("exec_vector_path requires a c-string")?;
+
+            unistd::execvp(&program_path, &[&program_path])?;
+            let wait_status = sys::wait::wait().context(
+                "wait for child process to change status / has child changed status",
+            )?;
+        }
+        return Ok(Pid::from_raw(0))
+    }
+    unreachable!("if this is reached it means the Args struct is not setup correctly anymore")
 }
 
 fn handle_command(pid: Pid, line: &str) {
