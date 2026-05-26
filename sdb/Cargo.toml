@@ -5,9 +5,9 @@ edition = "2024"
 
 [dependencies]
 libsdb = { path = "../libsdb" }
-nix = { version = "0.31.1", features = ["ptrace"] }
-clap = { version = "4.5.34", features = ["derive"] }
-anyhow = "1.0.98"
-log = "0.4.27"
-env_logger = "0.11.8"
-rustyline = "17.0.2"
+nix = { version = "0.31.3", features = ["ptrace"] }
+clap = { version = "4.6.1", features = ["derive"] }
+anyhow = "1.0.102"
+log = "0.4.30"
+env_logger = "0.11.10"
+rustyline = "18.0.0"
