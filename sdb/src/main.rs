@@ -6,6 +6,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use rustyline::history::History;
 
+// Rust-idiomatic cross platform wrapper to Unix-like system APIs
 use nix::sys;
 use nix::unistd::{self, Pid};
 
@@ -14,37 +15,55 @@ use nix::unistd::{self, Pid};
 #[group(id = "target", required = true, multiple = false)]
 struct Args {
     #[arg(group = "target")]
-    program_path: Option<String>,
+    program: Option<String>,
 
     #[arg(short = 'p', group = "target")]
     pid: Option<i32>,
 }
 
-fn attach(args: Args) -> Result<Pid> {
-    if let Some(pid) = args.pid {
-        if pid <= 0 {
-            bail!("Invalid pid")
-        }
-        let pid = Pid::from_raw(pid);
-        sys::ptrace::attach(pid).with_context(|| format!("attach to process {}", pid))?;
-        return Ok(pid);
-    }
-    if let Some(program_path) = args.program_path {
-        let fork_result = unsafe { unistd::fork().context("fork failed")? };
-        if fork_result.is_child() {
-            sys::ptrace::traceme()
-                .context("allow to send more ptrace request to this process in the future")?;
-            let program_path = std::ffi::CString::new(program_path)
-                .context("exec_vector_path requires a c-string")?;
+enum AttachTarget {
+    Pid(i32),
+    Program(String),
+}
 
-            unistd::execvp(&program_path, &[&program_path])?;
-            let wait_status = sys::wait::wait().context(
-                "wait for child process to change status / has child changed status",
-            )?;
+impl From<Args> for AttachTarget {
+    fn from(args: Args) -> Self {
+        if let Some(pid) = args.pid {
+            return AttachTarget::Pid(pid);
         }
-        return Ok(Pid::from_raw(0))
+        if let Some(program) = args.program {
+            return AttachTarget::Program(program);
+        }
+
+        unreachable!(
+            "If this ends up broken it means the clap argument parser implementation is broken."
+        );
     }
-    unreachable!("if this is reached it means the Args struct is not setup correctly anymore")
+}
+
+fn attach(target: AttachTarget) -> Result<Pid> {
+    match target {
+        AttachTarget::Pid(pid) => {
+            if pid <= 0 {
+                bail!("Invalid pid")
+            }
+            let pid = Pid::from_raw(pid);
+            sys::ptrace::attach(pid).with_context(|| format!("attach to process {}", pid))?;
+            Ok(pid)
+        }
+        AttachTarget::Program(program) => {
+            let fork_result = unsafe { unistd::fork().context("fork the program")? };
+            if fork_result.is_child() {
+                sys::ptrace::traceme()
+                    .context("allow to send more ptrace request to this process in the future")?;
+                let program_path = std::ffi::CString::new(program)
+                    .context("exec_vector_path requires a c-string")?;
+
+                unistd::execvp(&program_path, &[&program_path])?;
+            }
+            Ok(Pid::from_raw(0))
+        }
+    }
 }
 
 fn handle_command(pid: Pid, line: &str) {
@@ -56,8 +75,11 @@ fn main() -> Result<()> {
     builder.target(env_logger::Target::Stdout);
     builder.init();
 
-    let args = Args::parse();
-    let pid = attach(args).context("Attaching to a process")?;
+    let target: AttachTarget = Args::parse().into();
+    let pid = attach(target).context("Attaching to a process")?;
+    let wait_status = sys::wait::waitpid(pid, None)
+        .context("wait for child process to change status / has child changed status")?;
+
     let mut editor = DefaultEditor::new()?;
 
     loop {
