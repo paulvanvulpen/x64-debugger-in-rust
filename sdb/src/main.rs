@@ -80,7 +80,7 @@ fn main() -> Result<()> {
     let wait_status = sys::wait::waitpid(pid, None)
         .context("wait for child process to change status / has child changed status")?;
 
-    let mut editor = DefaultEditor::new()?;
+    let mut editor = DefaultEditor::new().context("Creates a command line interface")?;
 
     loop {
         let read_line = editor.readline("sdb> ");
