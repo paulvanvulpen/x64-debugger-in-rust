@@ -80,20 +80,35 @@ fn attach(target: AttachTarget) -> Result<Pid> {
     }
 }
 
-fn handle_raw_command(pid: Pid, raw_command: Option<Vec<String>>) {
-    if let Some(arguments) = raw_command {
-        match DebuggerCommands::try_parse_from(arguments) {
-            Ok(command) => match command {
-                DebuggerCommands::Continue => {
-                    println!("User typed a continue command")
-                }
-                DebuggerCommands::Break(BreakCommand::Set { address }) => {
-                    println!("User typed a break command with address {}", address)
-                }
-            },
-            Err(err) => log::info!("{}", "provided an unknown command"),
-        }
+fn resume(pid: Pid) -> Result<()> {
+    sys::ptrace::cont(pid.clone(), None)?;
+    Ok(())
+}
+
+fn wait_on_signal(pid: Pid) -> Result<()> {
+    sys::wait::waitpid(pid.clone(), None)?;
+    Ok(())
+}
+
+fn handle_raw_command(pid: Pid, raw_command: Option<Vec<String>>) -> Result<()> {
+    let Some(arguments) = raw_command else {
+        return Ok(());
+    };
+
+    match DebuggerCommands::try_parse_from(arguments) {
+        Ok(command) => match command {
+            DebuggerCommands::Continue => {
+                println!("User typed a continue command");
+                resume(pid).context("continue a process")?;
+                wait_on_signal(pid).context("waiting for paused process to continue")?
+            }
+            DebuggerCommands::Break(BreakCommand::Set { address }) => {
+                println!("User typed a break command with address {}", address);
+            }
+        },
+        Err(err) => log::info!("{}", "provided an unknown command"),
     }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -101,14 +116,10 @@ fn main() -> Result<()> {
     builder.target(env_logger::Target::Stdout);
     builder.init();
 
-    /*
-        let target: AttachTarget = Args::parse().into();
-        let pid = attach(target).context("Attaching to a process")?;
-        let wait_status = sys::wait::waitpid(pid, None)
-            .context("wait for child process to change status / has child changed status")?;
-    */
-    // temporary replacement, so I can test without arguments
-    let pid = Pid::from_raw(0);
+    let target: AttachTarget = Args::parse().into();
+    let pid = attach(target).context("Attaching to a process")?;
+    let wait_status = sys::wait::waitpid(pid, None)
+        .context("wait for child process to change status / has child changed status")?;
 
     let mut editor = DefaultEditor::new().context("Creates a command line interface")?;
 
@@ -119,7 +130,7 @@ fn main() -> Result<()> {
                 editor
                     .add_history_entry(line.as_str())
                     .context("adding to shell history")?;
-                handle_raw_command(pid, shlex::split(&line));
+                handle_raw_command(pid, shlex::split(&line))?;
             }
             Err(error) => {
                 match error {
