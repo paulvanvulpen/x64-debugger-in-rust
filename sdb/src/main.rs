@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use env_logger::Env;
 
 use rustyline::DefaultEditor;
@@ -19,6 +19,20 @@ struct Args {
 
     #[arg(short = 'p', group = "target")]
     pid: Option<i32>,
+}
+
+#[derive(Parser, Debug)]
+#[command(multicall = true)]
+enum DebuggerCommands {
+    #[command(visible_aliases = ["c", "cont"])]
+    Continue,
+    #[command(subcommand)]
+    Break(BreakCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum BreakCommand {
+    Set { address: String },
 }
 
 enum AttachTarget {
@@ -66,8 +80,20 @@ fn attach(target: AttachTarget) -> Result<Pid> {
     }
 }
 
-fn handle_command(pid: Pid, line: &str) {
-    println!("Called code {}", line);
+fn handle_raw_command(pid: Pid, raw_command: Option<Vec<String>>) {
+    if let Some(arguments) = raw_command {
+        match DebuggerCommands::try_parse_from(arguments) {
+            Ok(command) => match command {
+                DebuggerCommands::Continue => {
+                    println!("User typed a continue command")
+                }
+                DebuggerCommands::Break(BreakCommand::Set { address }) => {
+                    println!("User typed a break command with address {}", address)
+                }
+            },
+            Err(err) => log::info!("{}", "provided an unknown command"),
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -75,10 +101,14 @@ fn main() -> Result<()> {
     builder.target(env_logger::Target::Stdout);
     builder.init();
 
-    let target: AttachTarget = Args::parse().into();
-    let pid = attach(target).context("Attaching to a process")?;
-    let wait_status = sys::wait::waitpid(pid, None)
-        .context("wait for child process to change status / has child changed status")?;
+    /*
+        let target: AttachTarget = Args::parse().into();
+        let pid = attach(target).context("Attaching to a process")?;
+        let wait_status = sys::wait::waitpid(pid, None)
+            .context("wait for child process to change status / has child changed status")?;
+    */
+    // temporary replacement, so I can test without arguments
+    let pid = Pid::from_raw(0);
 
     let mut editor = DefaultEditor::new().context("Creates a command line interface")?;
 
@@ -89,7 +119,7 @@ fn main() -> Result<()> {
                 editor
                     .add_history_entry(line.as_str())
                     .context("adding to shell history")?;
-                handle_command(pid, line.as_str());
+                handle_raw_command(pid, shlex::split(&line));
             }
             Err(error) => {
                 match error {
