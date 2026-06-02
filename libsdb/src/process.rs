@@ -1,7 +1,12 @@
 use anyhow::{Context, Result, bail};
 use nix::sys;
+use nix::sys::wait::WaitStatus;
 use nix::unistd::{self, Pid};
-use std::path::Path;
+
+pub enum AttachTarget {
+    Pid(i32),
+    Program(String),
+}
 
 enum ProcessState {
     Stopped,
@@ -11,12 +16,18 @@ enum ProcessState {
 }
 
 pub struct Process {
-    pid: Pid,
+    pub pid: Pid, // todo!("pub while I'm refactoring things from main to a lib, but shouldn't stay that way")
     terminate_on_end: bool,
     pub state: ProcessState,
 }
 
 impl Process {
+    pub fn new(target: AttachTarget) -> Result<Self> {
+        match target {
+            AttachTarget::Pid(pid) => Process::attach(pid),
+            AttachTarget::Program(program) => Process::launch(program),
+        }
+    }
     /// Launches a new child process in a traced state using `ptrace`.
     ///
     /// This function forks the current process. The child process enables tracing on itself
@@ -27,7 +38,7 @@ impl Process {
     ///   > Indicate that this process is to be traced by its parent.
     /// * **`execve(2)`:** [Linux Man Pages](https://man7.org/linux/man-pages/man2/execve.2.html)
     ///   > If the current program is being ptraced, a SIGTRAP signal is sent to it after a successful execve().
-    pub fn launch(path: String) -> Result<Self> {
+    fn launch(path: String) -> Result<Self> {
         match unsafe { unistd::fork().context("fork the program")? } {
             // now there are two identical copies of this code running, so we need to catch who is the child
             unistd::ForkResult::Child => {
@@ -65,7 +76,7 @@ impl Process {
     /// * **`ptrace(2)` Attach:** [Linux Man Pages](https://man7.org/linux/man-pages/man2/ptrace.2.html)
     ///   > Attach to the process specified in pid, making it a tracee of the calling process.
     ///   > The tracee is sent a SIGSTOP, but will not necessarily have stopped by the completion of this call; use waitpid(2) to wait for the tracee to stop.
-    pub fn attach(raw_pid: i32) -> Result<Self> {
+    fn attach(raw_pid: i32) -> Result<Self> {
         if raw_pid <= 0 {
             bail!("Invalid pid")
         }
@@ -85,22 +96,45 @@ impl Process {
     }
 
     fn resume(pid: Pid) -> Result<()> {
-        sys::ptrace::cont(pid.clone(), None)?;
-        Ok(())
+        sys::ptrace::cont(pid.clone(), None).map_err(Into::into)
     }
 
-    fn wait_on_signal(&self) -> Result<()> {
-        sys::wait::waitpid(self.pid, None)?;
-        Ok(())
+    fn wait_on_signal(&self) -> Result<WaitStatus> {
+        sys::wait::waitpid(self.pid, None).map_err(Into::into)
     }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
+        if self.pid.as_raw() == 0 {
+            return;
+        }
+
+        if let ProcessState::Running = self.state {
+            sys::signal::kill(self.pid, sys::signal::SIGSTOP)
+                .with_context(|| format!("send a stop signal to process with PID: {}", self.pid))
+                .unwrap();
+            self.wait_on_signal()
+                .context("wait for SIGSTOP signal")
+                .unwrap();
+        }
+        sys::ptrace::detach(self.pid, None)
+            .with_context(|| format!("detach {}", self.pid))
+            .unwrap();
+        sys::signal::kill(self.pid, sys::signal::SIGCONT)
+            .with_context(|| format!("send a continue signal to process with PID: {}", self.pid))
+            .unwrap();
+        self.wait_on_signal()
+            .context("wait for SIGCONT signal")
+            .unwrap();
+
         if self.terminate_on_end {
-            todo!("implement what to do")
-        } else {
-            todo!("implement what to do")
+            sys::signal::kill(self.pid, sys::signal::SIGKILL)
+                .with_context(|| format!("send a kill signal to process with PID: {}", self.pid))
+                .unwrap();
+            self.wait_on_signal()
+                .context("wait for SIGKILL signal")
+                .unwrap();
         }
     }
 }

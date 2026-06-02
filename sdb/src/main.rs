@@ -35,59 +35,19 @@ enum BreakCommand {
     Set { address: String },
 }
 
-enum AttachTarget {
-    Pid(i32),
-    Program(String),
-}
-
-impl From<Args> for AttachTarget {
+impl From<Args> for libsdb::process::AttachTarget {
     fn from(args: Args) -> Self {
         if let Some(pid) = args.pid {
-            return AttachTarget::Pid(pid);
+            return libsdb::process::AttachTarget::Pid(pid);
         }
         if let Some(program) = args.program {
-            return AttachTarget::Program(program);
+            return libsdb::process::AttachTarget::Program(program);
         }
 
         unreachable!(
             "If this ends up broken it means the clap argument parser implementation is broken."
         );
     }
-}
-
-fn attach(target: AttachTarget) -> Result<Pid> {
-    match target {
-        AttachTarget::Pid(pid) => {
-            if pid <= 0 {
-                bail!("Invalid pid")
-            }
-            let pid = Pid::from_raw(pid);
-            sys::ptrace::attach(pid).with_context(|| format!("attach to process {}", pid))?;
-            Ok(pid)
-        }
-        AttachTarget::Program(program) => {
-            let fork_result = unsafe { unistd::fork().context("fork the program")? };
-            if fork_result.is_child() {
-                sys::ptrace::traceme()
-                    .context("allow to send more ptrace request to this process in the future")?;
-                let program_path = std::ffi::CString::new(program)
-                    .context("exec_vector_path requires a c-string")?;
-
-                unistd::execvp(&program_path, &[&program_path])?;
-            }
-            Ok(Pid::from_raw(0))
-        }
-    }
-}
-
-fn resume(pid: Pid) -> Result<()> {
-    sys::ptrace::cont(pid.clone(), None)?;
-    Ok(())
-}
-
-fn wait_on_signal(pid: Pid) -> Result<()> {
-    sys::wait::waitpid(pid.clone(), None)?;
-    Ok(())
 }
 
 fn handle_raw_command(pid: Pid, raw_command: Option<Vec<String>>) -> Result<()> {
@@ -99,8 +59,8 @@ fn handle_raw_command(pid: Pid, raw_command: Option<Vec<String>>) -> Result<()> 
         Ok(command) => match command {
             DebuggerCommands::Continue => {
                 println!("User typed a continue command");
-                resume(pid).context("continue a process")?;
-                wait_on_signal(pid).context("waiting for paused process to continue")?
+                // resume(pid).context("continue a process")?;
+                // wait_on_signal(pid).context("waiting for paused process to continue")?
             }
             DebuggerCommands::Break(BreakCommand::Set { address }) => {
                 println!("User typed a break command with address {}", address);
@@ -116,10 +76,8 @@ fn main() -> Result<()> {
     builder.target(env_logger::Target::Stdout);
     builder.init();
 
-    let target: AttachTarget = Args::parse().into();
-    let pid = attach(target).context("Attaching to a process")?;
-    let wait_status = sys::wait::waitpid(pid, None)
-        .context("wait for child process to change status / has child changed status")?;
+    let target: libsdb::process::AttachTarget = Args::parse().into();
+    let process = libsdb::process::Process::new(target)?;
 
     let mut editor = DefaultEditor::new().context("Creates a command line interface")?;
 
@@ -130,7 +88,7 @@ fn main() -> Result<()> {
                 editor
                     .add_history_entry(line.as_str())
                     .context("adding to shell history")?;
-                handle_raw_command(pid, shlex::split(&line))?;
+                handle_raw_command(process.pid, shlex::split(&line))?;
             }
             Err(error) => {
                 match error {
