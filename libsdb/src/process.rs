@@ -18,7 +18,7 @@ enum ProcessState {
 pub struct Process {
     pub pid: Pid, // todo!("pub while I'm refactoring things from main to a lib, but shouldn't stay that way")
     terminate_on_end: bool,
-    pub state: ProcessState,
+    state: ProcessState,
 }
 
 impl Process {
@@ -92,11 +92,14 @@ impl Process {
         attached_process
             .wait_on_signal()
             .context("waiting for the attached process to halt")?;
+
         Ok(attached_process)
     }
 
     fn resume(pid: Pid) -> Result<()> {
-        sys::ptrace::cont(pid.clone(), None).map_err(Into::into)
+        sys::ptrace::cont(pid, None)
+            .with_context(|| format!("resume process {}", pid))
+            .map_err(Into::into)
     }
 
     fn wait_on_signal(&self) -> Result<WaitStatus> {
@@ -105,36 +108,28 @@ impl Process {
 }
 
 impl Drop for Process {
+    /// The Process destructor
+    ///
+    /// Releases a process to which we are not the real parent.
+    /// Kills the process otherwise.
     fn drop(&mut self) {
         if self.pid.as_raw() == 0 {
             return;
         }
 
-        if let ProcessState::Running = self.state {
-            sys::signal::kill(self.pid, sys::signal::SIGSTOP)
-                .with_context(|| format!("send a stop signal to process with PID: {}", self.pid))
-                .unwrap();
-            self.wait_on_signal()
-                .context("wait for SIGSTOP signal")
-                .unwrap();
-        }
-        sys::ptrace::detach(self.pid, None)
-            .with_context(|| format!("detach {}", self.pid))
-            .unwrap();
-        sys::signal::kill(self.pid, sys::signal::SIGCONT)
-            .with_context(|| format!("send a continue signal to process with PID: {}", self.pid))
-            .unwrap();
-        self.wait_on_signal()
-            .context("wait for SIGCONT signal")
-            .unwrap();
-
+        // swallowing all the returns as we wouldn't want a panic to occur in a drop function.
+        // double panics are fatal.
         if self.terminate_on_end {
-            sys::signal::kill(self.pid, sys::signal::SIGKILL)
-                .with_context(|| format!("send a kill signal to process with PID: {}", self.pid))
-                .unwrap();
-            self.wait_on_signal()
-                .context("wait for SIGKILL signal")
-                .unwrap();
+            let _ = sys::signal::kill(self.pid, sys::signal::SIGKILL);
+            let _ = self.wait_on_signal();
+            return;
         }
+
+        if let ProcessState::Running = self.state {
+            let _ = sys::signal::kill(self.pid, sys::signal::SIGSTOP);
+            let _ = self.wait_on_signal();
+        }
+
+        let _ = sys::ptrace::detach(self.pid, sys::signal::SIGCONT);
     }
 }
