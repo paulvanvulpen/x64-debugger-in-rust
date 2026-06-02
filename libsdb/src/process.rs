@@ -121,13 +121,13 @@ impl Drop for Process {
         // double panics are fatal.
         if self.terminate_on_end {
             let _ = sys::signal::kill(self.pid, sys::signal::SIGKILL);
-            let _ = self.wait_on_signal();
+            let _ = sys::wait::waitpid(self.pid, None);
             return;
         }
 
         if let ProcessState::Running = self.state {
             let _ = sys::signal::kill(self.pid, sys::signal::SIGSTOP);
-            let _ = self.wait_on_signal();
+            let _ = sys::wait::waitpid(self.pid, None);
         }
 
         let _ = sys::ptrace::detach(self.pid, sys::signal::SIGCONT);
