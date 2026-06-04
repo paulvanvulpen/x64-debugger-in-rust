@@ -1,24 +1,21 @@
 use anyhow::{Context, Result, bail};
 use nix::sys;
+use nix::sys::signal::Signal;
 use nix::sys::wait::WaitStatus;
 use nix::unistd::{self, Pid};
 
+/// target to attach the debugger to.
+///
+/// expects either a PID or a program path.
 pub enum AttachTarget {
     Pid(i32),
     Program(String),
 }
 
-enum ProcessState {
-    Stopped,
-    Running,
-    Exited,
-    Terminated,
-}
-
 pub struct Process {
     pub pid: Pid, // todo!("pub while I'm refactoring things from main to a lib, but shouldn't stay that way")
     terminate_on_end: bool,
-    state: ProcessState,
+    wait_status: WaitStatus,
 }
 
 impl Process {
@@ -53,11 +50,16 @@ impl Process {
                 eprintln!("Child failed to exec program: {:?}", error);
                 std::process::exit(1);
             }
-            unistd::ForkResult::Parent { child } => {
+
+            unistd::ForkResult::Parent { child: child_pid } => {
+                let wait_status =
+                    sys::wait::waitpid(child_pid, None).context("waiting for child to execute")?;
+                assert_eq!(wait_status, WaitStatus::Stopped(child_pid, Signal::SIGSTOP));
+
                 let child_process = Self {
-                    pid: child,
+                    pid: child_pid,
                     terminate_on_end: true,
-                    state: ProcessState::Stopped,
+                    wait_status: wait_status,
                 };
 
                 child_process
@@ -83,23 +85,25 @@ impl Process {
         let pid = Pid::from_raw(raw_pid);
         sys::ptrace::attach(pid).with_context(|| format!("attach to process {}", pid))?;
 
+        let wait_status =
+            sys::wait::waitpid(pid, None).context("waiting for the attached process to halt")?;
+        assert_eq!(wait_status, WaitStatus::Stopped(pid, Signal::SIGSTOP));
+
         let attached_process = Self {
             pid,
             terminate_on_end: false,
-            state: ProcessState::Stopped,
+            wait_status,
         };
-
-        attached_process
-            .wait_on_signal()
-            .context("waiting for the attached process to halt")?;
 
         Ok(attached_process)
     }
 
-    fn resume(pid: Pid) -> Result<()> {
-        sys::ptrace::cont(pid, None)
-            .with_context(|| format!("resume process {}", pid))
-            .map_err(Into::into)
+    fn resume(&mut self) -> Result<()> {
+        sys::ptrace::cont(self.pid, None)
+            .with_context(|| format!("resume process {}", self.pid))?;
+
+        self.wait_status = WaitStatus::Continued(self.pid);
+        Ok(())
     }
 
     fn wait_on_signal(&self) -> Result<WaitStatus> {
@@ -125,11 +129,17 @@ impl Drop for Process {
             return;
         }
 
-        if let ProcessState::Running = self.state {
+        let is_running = match sys::ptrace::getregs(self.pid) {
+            Err(nix::errno::Errno::ESRCH) => true,
+            _ => false,
+        };
+
+        if is_running {
             let _ = sys::signal::kill(self.pid, sys::signal::SIGSTOP);
             let _ = sys::wait::waitpid(self.pid, None);
         }
 
+        // atomically detach and continue
         let _ = sys::ptrace::detach(self.pid, sys::signal::SIGCONT);
     }
 }
